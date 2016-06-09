@@ -1,6 +1,7 @@
 from unittest import TestLoader, TextTestRunner
 from unittest.case import TestCase
 from distances import dtw, p2p_dist, dtw_gradient
+from clustering import SmartDBSCAN, FastDSM
 import numpy as np
 import scipy.spatial.distance as dist
 import logging
@@ -23,14 +24,56 @@ class HierarchicalClassifier:
         leafs = self._make_nodes(X, y)
         last_level = leafs
 
-        for l in range(1, self.level):
+        if self.level >= 2:
 
-            #TODO: build intermediate levels using the clustering algorithm
-            pass
+            last_level = self.build_level(last_level, y)
+
+        for l in range(2, self.level):
+
+            eps = []
+            min_samples = []
+
+            data = self.get_samples(last_level)
+
+            model = SmartDBSCAN(self.distance)
+            model.fit(data, eps, min_samples, True)
+
+            last_level = self.build_level(last_level, model.labels_)
 
         for n in last_level:
 
             self.root.add_child(n)
+
+    def get_samples(self, level):
+
+        samples = []
+
+        for node in level:
+
+            samples.append(node.sample)
+
+        return np.array(samples)
+
+    def build_level(self, last_level, y):
+
+        this_level = []
+        classes = np.unique(y)
+
+        for c in classes:
+
+            Xc = np.where(y == c)[0]
+
+            node_c = HierarchicalNode(distance=self.distance)
+
+            for n in Xc:
+
+                node_c.add_child(last_level[n])
+
+            node_c.compute_stats()
+
+            this_level.append(node_c)
+
+        return this_level
 
     def predict(self, X):
         pass
@@ -180,6 +223,20 @@ class HierarchicalNode:
         error = self - other
 
         return error <= self.stats['max']
+
+    def compute_stats(self):
+
+        samples = np.array([child.sample for child in self.children])
+
+        mean_sample = np.mean(samples, 1)
+
+        distances = np.array([self.distance(mean_sample, s) for s in samples])
+
+        self.sample = samples[distances.argmin(),:]
+
+        self.stats['max'] = distances.max()
+        self.stats['mean'] = distances.mean()
+        self.stats['var'] = np.mean(np.abs(distances - self.stats['mean']))
 
     @property
     def isleaf(self):

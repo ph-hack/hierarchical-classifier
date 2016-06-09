@@ -1,10 +1,12 @@
 import matplotlib.pyplot as plt
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
-from sklearn.datasets import load_digits
+from sklearn.datasets import load_digits, load_iris
 from sklearn.lda import LDA
+from sklearn.decomposition import PCA
 from numpy import mean, zeros, where, unique, maximum, array
 from scipy.spatial.distance import euclidean, cosine
+from dsm import DSM, FastDSM
 
 
 def distance_matrix(data, metric=euclidean):
@@ -117,6 +119,8 @@ class SmartDBSCAN(object):
                     self.model = model
                     temp_score = score
 
+        return self
+
     @property
     def labels_(self):
 
@@ -125,26 +129,36 @@ class SmartDBSCAN(object):
 def test():
 
     db = load_digits(3)
+    # db = load_iris()
     X = db.data
     X = StandardScaler().fit(X).transform(X)
     labels = db.target
     pca = LDA(n_components=2)
+    # pca = PCA(n_components=2)
     data = pca.fit(db.data, db.target).transform(db.data)
-    X, uniques = remove_repetition(X)
+    # data = pca.fit(db.data).transform(db.data)
+    # X, uniques = remove_repetition(X)
+    data, uniques = remove_repetition(data)
+    labels = labels[uniques]
 
-    print db.data.shape
+    print data.shape
 
-    distances = [0.05, 0.1, 0.15, 0.2, 0.23, 0.25]
+    distances = [0.05, 0.07, 0.1, 0.15, 0.2, 0.01, 0.3, 0.5]
+    # distances = [0.5, 1., 1.5, 2., 2.5, 3.]
     n_samples = [3, 4, 5, 7, 10, 15]
 
     metric = cosine
 
-    model = SmartDBSCAN(metric=metric)
+    # model = SmartDBSCAN(metric=cosine)
+    dsm = FastDSM(base_metric=cosine, alpha=2).fit(data, labels, verbose=True)
+    # dsm = DSM(base_metric=cosine)
+    # dsm.w = array([0.7, 1.3])
+    model = SmartDBSCAN(metric=dsm)
     model.fit(data, distances, n_samples, verbose=True)
 
     pred = model.labels_
 
-    c_tags = ['ro', 'bo', 'go', 'yo', 'm*', 'c*', 'w*']
+    c_tags = ['ro', 'bo', 'go', 'yo', 'm*', 'c*', 'w*', 'g*', 'b*']
 
     _, axes = plt.subplots(1,2)
 
