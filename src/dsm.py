@@ -119,6 +119,17 @@ class Blob(object):
 
         return array(self.values).mean()
 
+    def normalize(self):
+
+        # v_min = array(self.values).min()
+        # v_max = array(self.values).max()
+        #
+        # for k in self:
+        #
+        #     self[k] = (self[k] - v_min)/(v_max - v_min)
+
+        return self
+
     @property
     def values(self):
 
@@ -149,14 +160,15 @@ class DSM(object):
 
         try:
             if self.scaler is not None:
-                x1 = self.scaler.transform(x1)
-                x2 = self.scaler.transform(x2)
+
+                x1 = self.scaler.transform([x1])[0]
+                x2 = self.scaler.transform([x2])[0]
 
         except NotFittedError:
 
             self.scaler.fit(array([x1, x2]))
-            x1 = self.scaler.transform(x1)
-            x2 = self.scaler.transform(x2)
+            x1 = self.scaler.transform([x1])[0]
+            x2 = self.scaler.transform([x2])[0]
 
         if self.w is None:
 
@@ -255,7 +267,7 @@ class DSM(object):
         return distances
 
     @staticmethod
-    def truth_matrix(labels):
+    def truth_matrix(labels, error_value=1.):
 
         # errors = zeros((len(labels), len(labels)))
         errors = Blob()
@@ -263,9 +275,7 @@ class DSM(object):
         for i in range(len(labels)-1):
 
             for j in range(i+1, len(labels)):
-
-                errors[i,j] = 0. if labels[i] == labels[j] else 1.
-                errors[j,i] = errors[i,j]
+                errors[i,j] = 0. if labels[i] == labels[j] else error_value
 
         return errors
 
@@ -278,14 +288,14 @@ class FastDSM(DSM):
 
         N = X.shape[1]
 
-        tm = DSM.truth_matrix(y)
-
         self.w = ones(N)
 
         dm = self.distance_matrix(X)
 
+        tm = DSM.truth_matrix(y, dm['current'].mean())
+
         directions = self.gradient(dm, tm)
-        directions /= abs(directions)
+        directions /= (abs(directions) + 0.000001)
 
         error = abs(tm - dm['current']).mean()
 
@@ -307,13 +317,13 @@ class FastDSM(DSM):
 
             for j in range(len(self.w)):
 
-                # self.w[j] -= self.beta * directions[j] * self.alpha * delta[j] #* self.w[j]
+                # self.w[j] -= self.beta * directions[j] * self.alpha * delta[j]# * self.w[j]
                 self.w[j] -= self.beta * directions[j] * self.w[j]
 
             dm = self.distance_matrix(X, only_current=True)
             error = abs(tm - dm['current']).mean()
 
-            # delta = abs(prior_error - error)/abs(prior_w - self.w)
+            # delta = abs(prior_error - error)/(abs(prior_w - self.w) + 0.0000001)
             # delta = abs(prior_error - error)/mean(hist_errors)
             # print 'Delta debug =',abs(prior_error - error), ' / ', abs(prior_w - self.w)
             # print 'Delta debug =',abs(prior_error - error), ' / ', mean(hist_errors)
@@ -351,7 +361,7 @@ class FastDSM(DSM):
             for j in range(i+1, len(data)):
 
                 distances['current'][i,j] = self.similarity(data[i,:], data[j,:])
-                distances['current'][j,i] = distances['current'][i,j]
+                # distances['current'][j,i] = distances['current'][i,j]
 
                 if not only_current:
                     for k in range(N):
@@ -359,7 +369,7 @@ class FastDSM(DSM):
                         self.w[k] += self.beta
 
                         distances['w{}'.format(k)][i,j] = self.similarity(data[i,:], data[j,:])
-                        distances['w{}'.format(k)][j,i] = distances['w{}'.format(k)][i,j]
+                        # distances['w{}'.format(k)][j,i] = distances['w{}'.format(k)][i,j]
 
                         self.w = current_w.copy()
 
