@@ -7,201 +7,133 @@ import scipy.spatial.distance as dist
 import logging
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+import warnings
 
 
-class HierarchicalClassifier:
+class SpaceRegion(object):
 
-    def __init__(self, level=1, distance=dist.euclidean, augmentations=None, log_file='classifier.log'):
+    def __init__(self, data, label, maxes=None, mins=None):
 
-        self.level = level
-        self.root = HierarchicalNode('root')
-        self.distance = distance
-        self.augmentations = augmentations
+        if maxes is None and mins is None:
+            self.mins = data.min(0)
+            self.maxes = data.max(0)
+        else:
+            self.mins = mins
+            self.maxes = maxes
 
-        logging.basicConfig(format='%(asctime)s %(message)s', filename=log_file, level=logging.DEBUG, filemode='w')
-
-    def fit(self, X, y):
-
-        # makes all samples nodes
-        leafs = self._make_nodes(X, y)
-        last_level = leafs
-
-        if self.level >= 2:
-
-            last_level = self.build_level(last_level, y)
-
-        for l in range(2, self.level):
-
-            eps = []
-            min_samples = []
-
-            data = self.get_samples(last_level)
-
-            model = SmartDBSCAN(self.distance)
-            model.fit(data, eps, min_samples, True)
-
-            last_level = self.build_level(last_level, model.labels_)
-
-        for n in last_level:
-
-            self.root.add_child(n)
-
-        self.root.compute_stats()
-
-    def get_samples(self, level):
-
-        samples = []
-
-        for node in level:
-
-            samples.append(node.sample)
-
-        return np.array(samples)
-
-    def build_level(self, last_level, y):
-
-        this_level = []
-        classes = np.unique(y)
-
-        for c in classes:
-
-            Xc = np.where(y == c)[0]
-
-            node_c = HierarchicalNode(label=c, distance=self.distance)
-
-            for n in Xc:
-
-                node_c.add_child(last_level[n])
-
-            node_c.compute_stats()
-
-            this_level.append(node_c)
-
-        return this_level
-
-    def predict(self, X):
-        pass
-
-    def decision_function(self, X):
-
-        decision = []
-        i = 1
-
-        logging.info('Applying classifier\n')
-
-        for i,x in enumerate(X):
-
-            logging.info('on sample {}----------------------------------'.format(i))
-
-            node_queue = [self.root]
-
-            candidates = {}
-            closest_sample = None
-            min_error = 100
-
-            while(len(node_queue) > 0):
-
-                current_node = node_queue.pop(0)
-
-                if current_node.isleaf:
-
-                    # error = current_node.sample - x
-                    error = current_node - x
-
-                    if current_node.label not in candidates:
-
-                        candidates[current_node.label] = error
-
-                    else:
-
-                        candidates[current_node.label] = error \
-                            if error < candidates[current_node.label] \
-                            else candidates[current_node.label]
-
-                    if error < min_error:
-
-                        closest_sample = current_node.sample
-                        min_error = error
-
-                elif current_node.test(x):
-
-                    node_queue.extend(current_node.children)
-
-                else:
-
-                    logging.warn('Did not passed {}'.format(current_node))
-
-            if len(candidates) > 0:
-                chosen = elect(candidates)
-            else:
-                chosen = [-1]
-
-            decision.append(chosen[0])
-
-            # face.compare_show(closestface, measure=True)
-            logging.info('candidates:\n{}\n'.format(str(top_candidates(candidates, 10))))
-            logging.info('face {}, closest {}\n'.format(str(x), str(closest_sample)))
-            logging.info('complete {}%\n'.format(i*100./len(X)))
-            i += 1
-
-        return decision
-
-    def _make_nodes(self, X, Y):
-
-        nodes = []
-        for i, x, y in zip(range(len(X)), X, Y):
-
-            #applies data augmentation and creates the new nodes
-            if self.augmentations is not None:
-
-                # TODO: Make the augmentantion methods generic as well
-                # faces = aug.augment_faces([face], self.augmentations)
-                #
-                # for f in faces:
-                #
-                #     nodes.append(HierarchicalNode(f))
-                pass
-
-            else:
-                nodes.append(HierarchicalNode(i, x, y, self.distance))
-
-        return nodes
-
-
-class HierarchicalNode:
-
-    def __init__(self, id=-1, sample=None, label=None, distance=dist.euclidean):
-
-        self.id = id
-        self.sample = sample
+        self.data = data
         self.label = label
-        self.children = []
-        self.parent = None
-        self.stats = stats_template()
-        self.distance = distance
 
     def __str__(self):
 
-        return '{}({})'.format(self.id, self.label)
+        if self.is_empty:
+            homogeneous = 'Empty\n'
+
+        elif self.is_homogeneous:
+            homogeneous = 'Homogeneous\n'
+
+        else:
+            homogeneous = 'Mixed\n'
+
+
+        return homogeneous + \
+            '\n'.join(['dim {}: min = {}, max = {}'.format(d, m, n)
+                          for d, m, n in
+                          zip(range(len(self.mins)), self.mins, self.maxes)]) \
+               + '\n'
+
+    @property
+    def is_homogeneous(self):
+
+        return len(np.unique(self.label)) == 1 and not self.is_empty
+
+    @property
+    def is_empty(self):
+
+        return len(self.data) == 0
+
+    def divide(self):
+
+        quadrants = []
+        m,n = self.data.shape
+        combs = np.zeros((np.power(2, n), n))
+
+        for i, c in enumerate(combs):
+
+            binary = bin(i)[2:]
+            binary = list(binary)
+            # print binary
+
+            for j, b in enumerate(binary):
+
+                c[len(c)-len(binary)+j] = int(b)
+                # print 'j =', j, ' b =', b
+
+        halfs = (self.maxes - self.mins)/2. + self.mins
+
+        # print combs
+        # print halfs
+
+        for c in combs:
+
+            x = np.array([True] * m)
+            mins = []
+            maxes = []
+
+            for d in range(n):
+
+                if len(x) == 0:
+
+                    print self
+
+                if c[d] == 0:
+                    x = (self.data[:,d] <= halfs[d]).__and__(x)
+                    mins.append(self.mins[d])
+                    maxes.append(halfs[d])
+                else:
+                    x = (self.data[:,d] > halfs[d]).__and__(x)
+                    mins.append(halfs[d])
+                    maxes.append(self.maxes[d])
+
+            quad = SpaceRegion(self.data[x,:], self.label[x], np.array(maxes), np.array(mins))
+
+            quadrants.append(quad)
+
+        return quadrants
+
+    def belongs(self, point):
+
+        dims_tests = [point[d] >= self.mins[d] and point[d] < self.maxes[d]
+                      for d in range(len(self.maxes))]
+
+        return all(dims_tests)
+
+
+class QuadTreeNode(object):
+
+    def __init__(self, id=-1, obj=None):
+
+        self.id = id
+        self.obj = obj
+        self.label = None
+        self.children = []
+        self.parent = None
+
+        if obj.is_homogeneous:
+
+            self.label = obj.label[0]
+
+        elif obj.is_empty:
+
+            self.label = -1
+
+    def __str__(self):
+
+        return '{}{}\nchildren\n\t{}{}'.format('{', self.obj, self.children, '}')
 
     def __repr__(self):
 
-        root = str(self)
-        parent = str(self.parent)
-        children = str([str(c) for c in self.children])
-        brothers = str([str(b) for b in self.get_brothers()])
-
-        return ''.join(['root = ', root, '\nparent = ', parent, '\nbrothers = ', brothers, '\nchildren = ', children,
-                        '\nstats:\n\tmax = ', str(self.stats['max']), '\n\tmean = ', str(self.stats['mean']),
-                        '\n\tvar = ', str(self.stats['var'])])
-
-    def __len__(self):
-
-        return len(self.children)
-
-    def __sub__(self, other):
-
-        return self.distance_to(other)
+        return str(self)
 
     def get_brothers(self):
 
@@ -214,7 +146,7 @@ class HierarchicalNode:
 
         for b in candidates_brothers:
 
-            if b.sample != self.sample:
+            if b.sample != self.obj:
 
                 brothers.append(b)
 
@@ -224,39 +156,6 @@ class HierarchicalNode:
 
         self.children.append(child)
         child.parent = self
-
-    def test(self, other):
-
-        if self.stats['max'] == 0 and self.stats['mean'] == 0 and self.stats['var'] == 0:
-
-            return True
-
-        error = self - other
-
-        return error <= self.stats['max']
-
-    def compute_stats(self):
-
-        samples = np.array([child.sample for child in self.children])
-
-        distances = distance_matrix(samples, self.distance)
-        s = distances.sum(0).argmin()
-
-        # distances = np.array([self.distance(s, samples.mean(0)) for s in samples])
-        # s = distances.argmin()
-
-        self.sample = samples[s,:]
-
-        maxs = [child.stats['max'] for child in self.children]
-        maxs.append(distances.max())
-
-        self.stats['max'] = np.max(maxs)
-        self.stats['mean'] = distances.mean()
-        self.stats['var'] = np.mean(np.abs(distances - self.stats['mean']))
-
-    def get_children_max(self):
-
-        return [child.stats['max'] for child in self.children]
 
     @property
     def isleaf(self):
@@ -268,98 +167,137 @@ class HierarchicalNode:
 
         return self.parent is None
 
-    def distance_to(self, other):
+    def divide(self):
 
-        if not isinstance(other, HierarchicalNode):
+        if self.label is None:
 
-            other = HierarchicalNode(sample=other)
+            children = self.obj.divide()
 
-        return self.distance(self.sample, other.sample)
+            for c in children:
+
+                child = QuadTreeNode(obj=c)
+                self.add_child(child)
+
+        return self
 
 
-def stats_template():
+class HierarchicalClassifier(object):
 
-    return {
+    def __init__(self, base_metric=dist.euclidean, levels=1, repr_method='mean'):
 
-        'max': 0,
-        'mean': 0,
-        'var': 0
-    }
+        self.root = None
+        self.metric = base_metric
+        self.levels = levels
+        self.repr_method = repr_method
 
-def elect(candidates):
+    def fit(self, X, y):
 
-    keys = candidates.keys()
-    values = np.array(candidates.values())
+        if self.levels > 1:
 
-    v = values.argmin()
+            warnings.warn('Hierarchical Classifier:\n Only one level is supported yet!')
 
-    return (keys[v], values[v])
+        X = self._transform(X, y)
 
-def top_candidates(candidates, k=1, order=None):
+        self.root = QuadTreeNode(obj=SpaceRegion(X, y))
 
-    keys = np.array(candidates.keys())
-    values = np.array(candidates.values())
+        queue = [self.root]
 
-    v = values.argsort().tolist()
+        while len(queue) >= 1:
 
-    if order == 'desc':
+            current_node = queue.pop()
 
-        v.reverse()
+            current_node.divide()
 
-    d = {}
+            if not current_node.isleaf:
 
-    for i in v[:k]:
+                queue.extend(current_node.children)
 
-        d[keys[i]] = values[i]
+        return self
 
-    return d
+    #TODO: Implement the merge method to remove the empty nodes
+    #TODO: Implement the predict method
+
+    def _pick_representants(self, X, y):
+
+        dm = distance_matrix(X, self.metric)
+        classes = np.unique(y)
+
+        representants = []
+
+        for c in classes:
+
+            Xc = np.where(y == c)[0]
+            Xnc = np.where(y != c)[0]
+
+            if self.repr_method == 'mean':
+
+                r = dm[Xc,Xc].sum(0).argmin()
+                rep = X[Xc[r],:]
+
+            elif self.repr_method == 'closest':
+
+                min_d = np.inf
+                rep = None
+
+                for x in Xc:
+
+                    d = dm[x,Xnc].mean()
+
+                    if d < min_d:
+
+                        min_d = d
+                        rep = X[x,:]
+
+            elif self.repr_method == 'farthest':
+
+                max_d = 0.
+                rep = None
+
+                for x in Xc:
+
+                    d = dm[x,Xnc].mean()
+
+                    if d > max_d:
+
+                        max_d = d
+                        rep = X[x,:]
+
+            representants.append(rep)
+
+        representants = np.array(representants)
+
+        # print representants
+        return representants
+
+    def _transform(self, X, y):
+
+        representants = self._pick_representants(X, y)
+
+        new_data = np.zeros((len(X), len(representants)))
+
+        for i, d in enumerate(X):
+
+            for j, r in enumerate(representants):
+
+                new_data[i,j] = self.metric(d, r)
+
+        # print new_data.shape
+        return new_data
+
+
+def dec_to_bin(x):
+
+    return int(bin(x)[2:])
 
 
 class HierarchicalTests(TestCase):
-
-    def est_01_node(self):
-
-        n1 = HierarchicalNode(0, [1,2,3,4], 'a')
-        n2 = HierarchicalNode(1, [5,6,7], 'b')
-        n3 = HierarchicalNode(2, [8,9,10], 'c')
-
-        n1.add_child(n2)
-        n1.add_child(n3)
-
-        reprn1 = "root = 0(a)\nparent = None\nbrothers = []\nchildren = ['1(b)', '2(c)']\nstats:\n\tmax = 0\n\tmean = 0\n\tvar = 0"
-        reprn2 = "root = 1(b)\nparent = 0(a)\nbrothers = ['2(c)']\nchildren = []\nstats:\n\tmax = 0\n\tmean = 0\n\tvar = 0"
-
-        # print 'n1:\n', repr(n1), '\n'
-        # print 'n2:\n', repr(n2), '\n'
-
-        self.assertEqual(repr(n1), reprn1)
-        self.assertEqual(repr(n2), reprn2)
-
-        self.assertTrue(n2.isleaf)
-        self.assertFalse(n1.isleaf)
-        self.assertTrue(n1.isroot)
-
-    def est_02_classifier(self):
-
-        db = load_digits(3)
-        pca = LDA(n_components=2)
-        data = pca.fit(db.data[:300,:], db.target[:300]).transform(db.data[:300,:])
-        # data = db.data[:300,:]
-        labels = db.target[:300]
-
-        model = HierarchicalClassifier(2)
-        model.fit(data, labels)
-
-        print repr(model.root)
-
-        print float(np.sum(np.array(model.decision_function(pca.transform(db.data[300:400,:]))) == labels))/len(db.target[300:400])
 
     def est_00_classifier_augmentation(self):
 
         # TODO: Implement the unit tests for the classifier using data augmentation
         pass
 
-    def test_04_space_transformation(self):
+    def est_04_space_transformation(self):
 
         # db = load_digits(2)
         db = load_iris()
@@ -453,19 +391,43 @@ class HierarchicalTests(TestCase):
         # axes[1].imshow(representants[1,:].reshape((8,8)), cmap='gray', interpolation='none')
         # plt.show()
 
-    def est_05_(self):
+    def est_05_space_region(self):
 
-        x = np.array([5, 6, 7])
-        y = np.array([1, 2, 3])
-        z = np.array([4, 8, 10])
+        db = load_iris()
 
-        w = np.array([2., 1.3, 0.2])
+        data = db.data[:,:3]
+        label = db.target
 
-        print 'x,y', dist.euclidean(x,y)/6.92
-        print 'x,z', dist.euclidean(x,z)/6.92
+        q = SpaceRegion(data, label)
 
-        print 'xw,yw', dist.euclidean(x*w,y*w)/9.57
-        print 'xw,zw', dist.euclidean(x*w,z*w)/9.57
+        print q.is_homogeneous
+
+        quads = q.divide()
+
+        print dec_to_bin(33)
+
+        print q
+
+        for c in quads:
+
+            print c
+
+        print 'it belongs =', q.belongs([5, 3, 2])
+        print 'it belongs =', q.belongs([2, 1, 7])
+
+    def test_06_classifier2(self):
+
+        db = load_digits(2)
+        # db = load_iris()
+        # pca = PCA(n_components=2)
+        # data = pca.fit(db.data, db.target).transform(db.data)
+        data = db.data
+        labels = db.target
+
+        model = HierarchicalClassifier()
+        model.fit(data, labels)
+
+        print model.root
 
 
 if __name__ == '__main__':
