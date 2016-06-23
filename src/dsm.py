@@ -304,7 +304,7 @@ class FastDSM(DSM):
 
         prior_error = error
         prior_w = self.w.copy()
-        #TODO: Whether remove these parts of the 'delta'/'gradient' term or make it optional
+        #TODO: Either remove these parts of the 'delta'/'gradient' term or make it optional
         # delta = ones(len(self.w))
         # delta = 1.
         # hist_errors = [abs(error - abs(tm - dm['w0']).mean())]

@@ -8,6 +8,21 @@ import logging
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import warnings
+import copy as cp
+from sklearn.pipeline import Pipeline
+from sklearn.cross_validation import train_test_split
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.svm import SVC
+
+
+class NoneTransformation(object):
+
+    def __init__(self):
+        pass
+
+    def transform(self, X):
+
+        return X
 
 
 class SpaceRegion(object):
@@ -27,20 +42,41 @@ class SpaceRegion(object):
     def __str__(self):
 
         if self.is_empty:
-            homogeneous = 'Empty\n'
+            type = 'Empty '
 
         elif self.is_homogeneous:
-            homogeneous = 'Homogeneous\n'
+            type = 'Homogeneous '
 
         else:
-            homogeneous = 'Mixed\n'
+            type = 'Mixed '
 
 
-        return homogeneous + \
-            '\n'.join(['dim {}: min = {}, max = {}'.format(d, m, n)
+        return type + \
+            ', '.join(['{}: {}->{}'.format(d, m, n)
                           for d, m, n in
-                          zip(range(len(self.mins)), self.mins, self.maxes)]) \
+                          zip(range(len(self.mins)), self.mins, self.maxes)])
+
+    def __repr__(self):
+
+        if self.is_empty:
+            type = 'Empty\n'
+
+        elif self.is_homogeneous:
+            type = 'Homogeneous\n'
+
+        else:
+            type = 'Mixed\n'
+
+
+        return 'Space Region\n' + type + \
+            '\n'.join(['dim {}: min = {}, max = {}, dist = {}'.format(d, m, n, k)
+                          for d, m, n, k in
+                          zip(range(len(self.mins)), self.mins, self.maxes, self.maxes - self.mins)]) \
                + '\n'
+
+    def __eq__(self, other):
+        # TODO: Finish the implementation of this method
+        pass
 
     @property
     def is_homogeneous(self):
@@ -108,6 +144,51 @@ class SpaceRegion(object):
 
         return all(dims_tests)
 
+    def is_mergeable(self, other, common_dim=None):
+
+        min_dim = len(self.mins) - 1
+
+        if common_dim is None:
+
+            common_dim = self.common_dim(other)
+
+        return sum(common_dim) == min_dim
+
+    def common_dim(self, other):
+
+        return [1 if self.mins[d] == other.mins[d] and self.maxes[d] == other.maxes[d] else 0
+                for d in range(len(self.mins))]
+
+    def merge(self, other):
+
+        common_dim = self.common_dim(other)
+
+        if self.is_mergeable(other, common_dim):
+
+            for i, c in enumerate(common_dim):
+
+                if c == 0:
+
+                    self.maxes[i] = max(self.maxes[i], other.maxes[i])
+                    self.mins[i] = min(self.mins[i], other.mins[i])
+
+                    if len(other.data) > 0:
+                        try:
+                            self.data = np.concatenate((self.data, other.data))
+                            self.label = np.concatenate((self.label, other.label))
+
+                        except TypeError:
+
+                            print 'current data =', self.data.shape
+                            print 'current label =', self.label.shape
+                            print 'other data =', self.data.shape
+                            print 'othe label =', self.label.shape
+                            raise TypeError('haha')
+
+            return True
+
+        return False
+
 
 class QuadTreeNode(object):
 
@@ -129,7 +210,7 @@ class QuadTreeNode(object):
 
     def __str__(self):
 
-        return '{}{}\nchildren\n\t{}{}'.format('{', self.obj, self.children, '}')
+        return 'Class:[{}]\nObj: {}{}{}\nchildren\n\t{}'.format(self.label, '{', self.obj, '}', self.children)
 
     def __repr__(self):
 
@@ -146,7 +227,7 @@ class QuadTreeNode(object):
 
         for b in candidates_brothers:
 
-            if b.sample != self.obj:
+            if b.obj != self.obj:
 
                 brothers.append(b)
 
@@ -180,16 +261,33 @@ class QuadTreeNode(object):
 
         return self
 
+    def merge(self, other):
+
+        worked = self.obj.merge(other.obj)
+
+        if worked:
+
+            self.label = max(self.label, other.label)
+
+        return worked
+
+    def belongs(self, point):
+
+        return self.obj.belongs(point)
+
 
 class HierarchicalClassifier(object):
 
-    def __init__(self, base_metric=dist.euclidean, levels=1, repr_method='mean'):
+    def __init__(self, base_metric=dist.euclidean, levels=1, repr_method='mean', dim_transf='none'):
 
         self.root = None
         self.metric = base_metric
         self.levels = levels
         self.repr_method = repr_method
+        self.representants = None
+        self.dim_transf = dim_transf
 
+    # TODO: Implement and test the PCA or LDA transformation after the distance one
     def fit(self, X, y):
 
         if self.levels > 1:
@@ -197,6 +295,10 @@ class HierarchicalClassifier(object):
             warnings.warn('Hierarchical Classifier:\n Only one level is supported yet!')
 
         X = self._transform(X, y)
+
+        print X.shape
+
+        # cluster = SmartDBSCAN(metric=dist.cosine).fit(self.representants, [], [], True)
 
         self.root = QuadTreeNode(obj=SpaceRegion(X, y))
 
@@ -212,10 +314,70 @@ class HierarchicalClassifier(object):
 
                 queue.extend(current_node.children)
 
+        self._merge_nodes()
+
         return self
 
-    #TODO: Implement the merge method to remove the empty nodes
     #TODO: Implement the predict method
+    def predict(self, X, force_class=False):
+
+        X = self._transform(X)
+
+        preds = []
+        for i, x in enumerate(X):
+
+            queue = [self.root]
+            preds.append(-1)
+
+            while len(queue) > 0:
+
+                current_node = queue.pop()
+
+                if current_node.belongs(x):
+
+                    if not current_node.isleaf:
+
+                        queue.extend(current_node.children)
+                    else:
+                        preds[i] = current_node.label
+                        break
+
+            if preds[i] == -1 and force_class:
+
+                preds[i] = x.argmin()
+
+        return np.array(preds)
+
+    def _merge_nodes(self):
+
+        queue = cp.copy(self.root.children)
+
+        while len(queue) > 0:
+
+            current_node = queue.pop()
+
+            if current_node.label is None:
+
+                queue.extend(cp.copy(current_node.children))
+
+            else: #if current_node.label >= 0:
+                brothers = current_node.get_brothers()
+
+                for b in brothers:
+
+                    if ((current_node.label == -1 and b.label >= 0) or (current_node.label >= 0  and (current_node.label == b.label or b.label == -1))) and current_node.merge(b):
+
+                        # print 'Node \n{}\ntook over\n{}\n'.format(current_node, b)
+                        b.parent.children.remove(b)
+
+                        try:
+                            queue.remove(b)
+
+                        except ValueError as e:
+                            warnings.warn(e.message)
+
+                        queue.append(current_node)
+                        break
 
     def _pick_representants(self, X, y):
 
@@ -269,19 +431,52 @@ class HierarchicalClassifier(object):
         # print representants
         return representants
 
-    def _transform(self, X, y):
+    def _transform(self, X, y=None):
 
-        representants = self._pick_representants(X, y)
+        if y is not None:
 
-        new_data = np.zeros((len(X), len(representants)))
+            c = len(np.unique(y))
+
+            if self.dim_transf == 'PCA':
+
+                self.dim_transf = PCA(n_components=c) .fit(X, y)
+
+            elif self.dim_transf == 'LDA':
+
+                self.dim_transf = LDA(n_components=c).fit(X, y)
+
+            elif self.dim_transf == 'scaler':
+
+                self.dim_transf = StandardScaler().fit(X, y)
+
+            elif self.dim_transf == 'hybrid':
+
+                self.dim_transf = Pipeline(steps=[
+                    ('pca', PCA()),
+                    ('lda', LDA(n_components=c))
+                ]).fit(X, y)
+
+            else:
+                self.dim_transf = NoneTransformation()
+
+        X = self.dim_transf.transform(X)
+
+        if y is not None:
+
+            if isinstance(self.metric, FastDSM):
+
+                self.metric.fit(X, y, True)
+
+            self.representants = self._pick_representants(X, y)
+
+        new_data = np.zeros((len(X), len(self.representants)))
 
         for i, d in enumerate(X):
 
-            for j, r in enumerate(representants):
+            for j, r in enumerate(self.representants):
 
                 new_data[i,j] = self.metric(d, r)
 
-        # print new_data.shape
         return new_data
 
 
@@ -417,17 +612,92 @@ class HierarchicalTests(TestCase):
 
     def test_06_classifier2(self):
 
-        db = load_digits(2)
+        # TODO: Test with the iris and diabetes datasets
+        db = load_digits()
         # db = load_iris()
         # pca = PCA(n_components=2)
         # data = pca.fit(db.data, db.target).transform(db.data)
-        data = db.data
-        labels = db.target
 
-        model = HierarchicalClassifier()
-        model.fit(data, labels)
+        n = len(db.images)
+        X = db.images.reshape((n, -1))
+        y = db.target
 
-        print model.root
+        # X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.4)#, stratify=y)
+
+        X_tr = X[:n/2]
+        X_te = X[n/2:]
+        y_tr = y[:n/2]
+        y_te = y[n/2:]
+
+        model = HierarchicalClassifier(dim_transf='PCA', base_metric=dist.euclidean, repr_method='mean')
+        model.fit(X_tr, y_tr)
+
+        y_pred = model.predict(X_te, True)
+
+        print classification_report(y_te, y_pred)
+        print 'accuracy =', accuracy_score(y_te, y_pred)
+
+        # lda = LDA(n_components=10).fit(X_tr, y_tr)
+        # X_tr = lda.transform(X_tr)
+        # X_te = lda.transform(X_te)
+        #
+        # svm = SVC().fit(X_tr, y_tr)
+        #
+        # y_pred = svm.predict(X_te)
+        #
+        # print classification_report(y_te, y_pred)
+        # print 'accuracy =', accuracy_score(y_te, y_pred)
+
+    def est_07_merging(self):
+
+        data = np.array([
+            [0, 4],
+            [1, 6],
+            [2, 5],
+            [2, 8],
+            [3, 6],
+            [4.7, 6],
+            [3.5, 0],
+
+            [3.7, 3.8],
+            [4.9, 2.4],
+            [6, 3.5],
+            [7, 3.3],
+            [5.3, 6],
+            [6, 5.5],
+            [7.6, 5.8],
+            [6.3, 8],
+            [7.3, 10],
+            [10, 5.1],
+        ])
+        label = np.array([0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1])
+
+        model = HierarchicalClassifier(dim_transf='hybrid')
+        model.fit(data, label)
+
+        plt.plot(data[:7,0],data[:7,1], 'ro')
+        plt.plot(data[7:,0],data[7:,1], 'b*')
+        plt.show()
+
+        data = model.root.obj.data
+        plt.plot(data[:7,0],data[:7,1], 'ro')
+        # plt.plot(data[:7,0], 'ro')
+        plt.plot(data[7:,0],data[7:,1], 'b*')
+        # plt.plot(data[7:,0], 'b*')
+        plt.show()
+
+        test = np.array([
+            [1, 1],
+            [4, 1],
+            [7, 7],
+            [1, 10],
+            [12, 6],
+            [3, 14]
+        ])
+
+        # print model.predict(test)
+        print model.predict(test, True)
+        print np.array([0, 0, 1, 1, 1, 0])
 
 
 if __name__ == '__main__':
