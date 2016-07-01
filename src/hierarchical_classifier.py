@@ -112,12 +112,14 @@ class DynamicSpaceRegion(SpaceRegion):
 
     @property
     def is_homogeneous(self):
+        if self.is_empty:
+            return True
 
         classes = np.unique(self.label)
         Nc = [len(np.where(self.label == c)[0]) for c in classes]
         homogeneity = float(max(Nc))/len(self.label)
 
-        return homogeneity >= self.homogeneity_threshold and not self.is_empty
+        return homogeneity >= self.homogeneity_threshold
 
     def divide(self):
 
@@ -169,6 +171,61 @@ class DynamicSpaceRegion(SpaceRegion):
             mins[chosen_dim] = interval[0] if i > 0 else -np.inf
 
             children.append(DynamicSpaceRegion(self.data[x,:], self.label[x], maxes, mins, self.homogeneity_threshold))
+
+        return children
+
+    def divide2(self):
+
+        dim_free_intervals, dim_weights, deltas = self._get_free_interval_weights()
+
+        maxes = cp.copy(self.maxes)
+        mins = cp.copy(self.mins)
+
+        children = []
+
+        for chosen_dim in range(len(self.maxes)):
+
+            chosen_intervals = dim_free_intervals[chosen_dim]
+
+            # TODO: Implement the complement of the free intervals, replace the mins and maxs with the ones of this SpaceRegion obj
+            chosen_intervals = np.array(chosen_intervals)
+            M = chosen_intervals.max()
+            m = chosen_intervals.min()
+            chosen_intervals[chosen_intervals == M] = self.maxes[chosen_dim]
+            chosen_intervals[chosen_intervals == m] = self.mins[chosen_dim]
+
+            temp_chosen_intervals = chosen_intervals.copy()
+            interval_inserted = 0
+
+            for i, j in zip(range(0, len(chosen_intervals)-1), range(1, len(chosen_intervals))):
+
+                if temp_chosen_intervals[i,1] < temp_chosen_intervals[j,0]:
+
+                    # chosen_intervals[i,1] -= deltas[chosen_dim]
+                    # chosen_intervals[j,0] += deltas[chosen_dim]
+                    x = np.array([temp_chosen_intervals[i,1], temp_chosen_intervals[j,0]]).reshape((1, len(temp_chosen_intervals[0,:])))
+                    chosen_intervals = np.concatenate((chosen_intervals[:(j + interval_inserted),:], x, chosen_intervals[(j + interval_inserted):,:]), 0)
+                    interval_inserted += 1
+
+
+
+            for i, interval in enumerate(chosen_intervals):
+
+                if i == 0:
+                    x = np.array(self.data[:, chosen_dim] < interval[1])
+
+                elif i == len(chosen_intervals)-1:
+
+                    x = np.array(self.data[:,chosen_dim] >= interval[0])
+
+                else:
+
+                    x =  np.array(self.data[:, chosen_dim] >= interval[0]).__and__(np.array(self.data[:, chosen_dim] < interval[1]))
+
+                maxes[chosen_dim] = interval[1] if i < len(chosen_intervals)-1 else np.inf
+                mins[chosen_dim] = interval[0] if i > 0 else -np.inf
+
+                children.append(DynamicSpaceRegion(self.data[x,:], self.label[x], maxes, mins, self.homogeneity_threshold))
 
         return children
 
@@ -580,6 +637,163 @@ class HierarchicalClassifier(object):
 
                         queue.append(current_node)
                         break
+
+    def _pick_representants(self, X, y):
+
+        dm = distance_matrix(X, self.metric)
+        classes = np.unique(y)
+
+        representants = []
+
+        for c in classes:
+
+            Xc = np.where(y == c)[0]
+            Xnc = np.where(y != c)[0]
+
+            if self.repr_method == 'mean':
+
+                r = dm[Xc,Xc].sum(0).argmin()
+                rep = X[Xc[r],:]
+
+            elif self.repr_method == 'closest':
+
+                min_d = np.inf
+                rep = None
+
+                for x in Xc:
+
+                    d = dm[x,Xnc].mean()
+
+                    if d < min_d:
+
+                        min_d = d
+                        rep = X[x,:]
+
+            elif self.repr_method == 'farthest':
+
+                max_d = 0.
+                rep = None
+
+                for x in Xc:
+
+                    d = dm[x,Xnc].mean()
+
+                    if d > max_d:
+
+                        max_d = d
+                        rep = X[x,:]
+
+            representants.append(rep)
+
+        representants = np.array(representants)
+
+        # print representants
+        return representants
+
+    def _transform(self, X, y=None):
+
+        if y is not None:
+
+            c = len(np.unique(y))
+
+            if self.dim_transf == 'PCA':
+
+                self.dim_transf = PCA(n_components=c) .fit(X, y)
+
+            elif self.dim_transf == 'LDA':
+
+                self.dim_transf = LDA(n_components=c).fit(X, y)
+
+            elif self.dim_transf == 'scaler':
+
+                self.dim_transf = StandardScaler().fit(X, y)
+
+            elif self.dim_transf == 'hybrid':
+
+                self.dim_transf = Pipeline(steps=[
+                    ('pca', PCA()),
+                    ('lda', LDA(n_components=c))
+                ]).fit(X, y)
+
+            else:
+                self.dim_transf = NoneTransformation()
+
+        X = self.dim_transf.transform(X)
+
+        if y is not None:
+
+            if isinstance(self.metric, FastDSM):
+
+                self.metric.fit(X, y, True)
+
+            self.representants = self._pick_representants(X, y)
+
+        new_data = np.zeros((len(X), len(self.representants)))
+
+        for i, d in enumerate(X):
+
+            for j, r in enumerate(self.representants):
+
+                new_data[i,j] = self.metric(d, r)
+
+        return new_data
+        # return X
+
+
+class DynamicClassifier(HierarchicalClassifier):
+
+    def fit(self, X, y):
+
+        if self.levels > 1:
+
+            warnings.warn('Hierarchical Classifier:\n Only one level is supported yet!')
+
+        X = self._transform(X, y)
+
+        print X.shape
+
+        # cluster = SmartDBSCAN(metric=dist.cosine).fit(self.representants, [], [], True)
+
+        self.root = HierarchicalNode(obj=DynamicSpaceRegion(X, y, homogeneity_threshold=0.9))
+
+        queue = [self.root]
+
+        while len(queue) >= 1:
+
+            current_node = queue.pop()
+
+            current_node.divide()
+
+            if not current_node.isleaf:
+
+                queue.extend(current_node.children)
+
+        return self
+
+    def predict(self, X, **kwargs):
+
+        X = self._transform(X)
+
+        preds = []
+        for i, x in enumerate(X):
+
+            queue = [self.root]
+            preds.append(-1)
+
+            while len(queue) > 0:
+
+                current_node = queue.pop()
+
+                if current_node.belongs(x):
+
+                    if not current_node.isleaf:
+
+                        queue.extend(current_node.children)
+                    else:
+                        preds[i] = current_node.label
+                        break
+
+        return np.array(preds)
 
     def _pick_representants(self, X, y):
 
@@ -1147,7 +1361,7 @@ class HierarchicalTests(TestCase):
         # print label
         # print model.predict(data)
 
-    def est_9_classification(self):
+    def test_9_classification(self):
 
         # TODO: Test with the iris and diabetes datasets
         # db = load_digits()
@@ -1160,9 +1374,9 @@ class HierarchicalTests(TestCase):
 
         X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=5)#, stratify=y)
 
-        # model = HierarchicalClassifier(dim_transf='LDA', base_metric=dist.euclidean, repr_method='closest')
+        # model = HierarchicalClassifier(dim_transf='none', base_metric=dist.cosine, repr_method='mean')
         # model = DynamicClassifier(dim_transf='LDA', base_metric=dist.euclidean, repr_method='closest')
-        model = DynamicClassifier(dim_transf='none', base_metric=dist.cosine, repr_method='mean')
+        model = DynamicClassifier(dim_transf='LDA', base_metric=dist.cosine, repr_method='mean')
         model.fit(X_tr, y_tr)
 
         y_pred = model.predict(X_te, force_class=True)
@@ -1176,9 +1390,12 @@ class HierarchicalTests(TestCase):
         print model.root
         # print y_pred
 
-    def test_10_classification(self):
+    def est_10_classification(self):
 
         import pandas as pd
+        import matplotlib.pyplot as plt
+        import m_learn.mlproblem as mlp
+
         data = pd.read_csv('../dermathology.csv').values
 
         X = data[:,:34]
@@ -1189,22 +1406,36 @@ class HierarchicalTests(TestCase):
 
         X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=5)#, stratify=y)
 
+        #
+        # P = mlp.MLProblem.load_from_file('/home/phack/Documents/Python/AFD/afd_application/problem_object.mlp')
+        # print P.variables.names()
+        # X_tr = np.array(P.get_data(vars=['nss2_window_half', 'fft_window_half', 'shb_window_half_with_resize'], samples=P.splits['train']))
+        # X_te = np.array(P.get_data(vars=['nss2_window_half', 'fft_window_half', 'shb_window_half_with_resize'], samples=P.splits['test']))
+        # y_tr = np.array(P.get_data(vars=['label'], samples=P.splits['train']))
+        # y_te= np.array(P.get_data(vars=['label'], samples=P.splits['test']))
+
         scaler = StandardScaler().fit(X_tr)
         X_tr = scaler.transform(X_tr)
         X_te = scaler.transform(X_te)
 
-        lda = PCA().fit(X_tr, y_tr)
-        X_tr = lda.transform(X_tr)
-        X_te = lda.transform(X_te)
+        # print 'computing the LDA'
+        # lda = PCA().fit(X_tr, y_tr)
+        # X_tr = lda.transform(X_tr)
+        # X_te = lda.transform(X_te)
+        # print 'done', X_tr.shape
 
-        # model = HierarchicalClassifier(dim_transf='LDA', base_metric=dist.euclidean, repr_method='farthest')
-        model = DynamicClassifier(dim_transf='LDA', base_metric=dist.euclidean, repr_method='farthest')
+        model = HierarchicalClassifier(dim_transf='LDA', base_metric=dist.euclidean, repr_method='mean')
+        # model = DynamicClassifier(dim_transf='LDA', base_metric=dist.euclidean, repr_method='farthest')
         model.fit(X_tr, y_tr)
 
         y_pred = model.predict(X_te, force_class=True)
 
         # model = SVC().fit(X_tr, y_tr)
         # y_pred = model.predict(X_te)
+
+        plt.plot(X_tr[y_tr == 0], 'bo')
+        plt.plot(X_tr[y_tr == 1], 'ro')
+        plt.show()
 
         print classification_report(y_te, y_pred)
         print 'accuracy =', accuracy_score(y_te, y_pred)
